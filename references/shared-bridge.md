@@ -19,6 +19,7 @@ python scripts/shared_serial_bridge.py connect --tcp 8888
 ```
 
 The human can watch live output and type commands here.
+By default, pressing Enter sends `CR` only. This matches many embedded shells better than `CRLF`.
 
 ## Agent Command
 
@@ -27,6 +28,7 @@ python scripts/shared_serial_bridge.py send "misc md 0x00000000 4" --tcp 8888 --
 ```
 
 Use `--newline` for command shells that execute on Enter. The agent's command and device response are visible to other clients connected to the bridge.
+If a device expects a different line ending, use `--line-ending crlf` or `--line-ending lf`.
 
 ## Coordination Rules
 

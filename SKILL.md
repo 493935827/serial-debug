@@ -25,6 +25,8 @@ python scripts/shared_serial_bridge.py bridge --port COM10 --baud 57600 --tcp 88
 python scripts/shared_serial_bridge.py connect --tcp 8888
 ```
 
+The bundled bridge defaults to `CR` for Enter because many embedded shells treat `CRLF` as two submissions and print the prompt twice.
+
 3. Have the agent send through the same bridge:
 
 ```bash
