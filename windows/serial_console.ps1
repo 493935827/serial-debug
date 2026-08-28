@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet("Menu", "Start", "Stop", "Status", "Connect", "Send", "Ports", "AutoDetect", "SwitchConnect")]
+    [ValidateSet("Menu", "Start", "Stop", "Release", "Status", "Connect", "Send", "Ports", "AutoDetect", "DetectConnect")]
     [string]$Action = "Menu",
     [string]$Command
 )
@@ -204,16 +204,15 @@ function Find-NextSerialPort {
     return $PortName
 }
 
-function Switch-AndConnectNextSerialPort {
-    $OldConfig = Get-SerialConfig
-    Write-Host "准备释放当前串口：$($OldConfig.Port)" -ForegroundColor Cyan
-    Stop-SerialBridge
-    Start-Sleep -Milliseconds 300
-    if (Test-TcpEndpoint $OldConfig.Host $OldConfig.TcpPort) {
-        throw "共享地址 $($OldConfig.Host):$($OldConfig.TcpPort) 仍被其他进程占用，无法安全地自动连接。"
+function Detect-AndConnectNextSerialPort {
+    $CurrentConfig = Get-SerialConfig
+    if ($null -ne (Get-BridgeProcess)) {
+        throw "当前串口仍被本工具占用，请先选择菜单 4 释放当前 COM 口。"
+    }
+    if (Test-TcpEndpoint $CurrentConfig.Host $CurrentConfig.TcpPort) {
+        throw "共享地址 $($CurrentConfig.Host):$($CurrentConfig.TcpPort) 已被占用，请先释放占用后再连接。"
     }
 
-    Write-Host "当前串口已释放。现在请拔插目标 USB-UART，或接入新的串口。" -ForegroundColor Green
     $DetectedPort = Find-NextSerialPort
     if ([string]::IsNullOrWhiteSpace($DetectedPort)) { return }
 
@@ -259,7 +258,7 @@ function Show-Menu {
         Write-Host "2. 打开交互终端"
         Write-Host "3. 发送单条命令"
         Write-Host "4. 停止串口桥并释放 COM 口"
-        Write-Host "5. 释放当前 COM 口，检测下次接入并自动连接"
+        Write-Host "5. 自动检测下次接入的串口并连接"
         Write-Host "6. 只自动检测下次接入的串口"
         Write-Host "7. 查看当前串口"
         Write-Host "8. 编辑本地配置"
@@ -273,7 +272,7 @@ function Show-Menu {
                 "2" { Open-SerialTerminal }
                 "3" { $Text = Read-Host "请输入命令"; Send-SerialCommand $Text }
                 "4" { Stop-SerialBridge }
-                "5" { Switch-AndConnectNextSerialPort }
+                "5" { Detect-AndConnectNextSerialPort }
                 "6" { Find-NextSerialPort | Out-Null }
                 "7" { Show-SerialPorts }
                 "8" { Edit-SerialConfig }
@@ -298,6 +297,7 @@ function Show-Menu {
 switch ($Action) {
     "Start"      { Start-SerialBridge }
     "Stop"       { Stop-SerialBridge }
+    "Release"    { Stop-SerialBridge }
     "Status"     { Show-SerialStatus }
     "Connect"    { Open-SerialTerminal }
     "Send"       {
@@ -306,6 +306,6 @@ switch ($Action) {
     }
     "Ports"      { Show-SerialPorts }
     "AutoDetect" { Find-NextSerialPort | Out-Null }
-    "SwitchConnect" { Switch-AndConnectNextSerialPort }
+    "DetectConnect" { Detect-AndConnectNextSerialPort }
     default      { Show-Menu }
 }

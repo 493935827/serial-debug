@@ -7,19 +7,20 @@
 ## 第一次使用
 
 1. 双击 `serial_console.cmd`。
-2. 选择 `5`，工具会释放当前串口，然后等待你插入或重新插入 USB-UART。
-3. 检测成功后，工具会保存新端口、启动串口桥并自动打开终端。
-4. 如需修改波特率，选择 `8` 编辑本地配置。
-5. 终端中按 `Ctrl+C` 返回菜单；后台串口桥不会停止。
-6. 回到菜单选择 `4`，真正关闭串口桥并释放 COM 口。
+2. 如果当前串口桥正在运行，先选择 `4`，只释放当前 COM 口。
+3. 选择 `5`，等待你插入或重新插入 USB-UART。
+4. 检测成功后，工具会保存新端口、启动串口桥并自动打开终端。
+5. 如需修改波特率，选择 `8` 编辑本地配置。
+6. 终端中按 `Ctrl+C` 返回菜单；后台串口桥不会停止。
 
 菜单窗口可以随时关闭；只要没有选择 `4`，后台串口桥就会继续运行。再次双击脚本即可查看状态、打开终端或停止它。
 
 ## 自动检测下一次接入的串口
 
-菜单提供两种检测方式：
+释放和自动连接是两个独立功能：
 
-- 选项 `5`：释放本工具占用的当前 COM 口，检测下一次接入，保存新端口，启动串口桥并自动打开 miniterm。
+- 选项 `4`：只停止本工具的串口桥并释放当前 COM 口，不检测、不连接。
+- 选项 `5`：检测下一次接入，保存新端口，启动串口桥并自动打开 miniterm；如果旧串口尚未释放，会提示先执行选项 `4`。
 - 选项 `6`：只检测并保存下一次接入的串口，不启动串口桥。
 
 检测过程会先记录当前串口列表，再等待最多 120 秒：
@@ -60,8 +61,9 @@
 除了双击菜单，也可以执行：
 
 ```powershell
+.\serial_console.ps1 -Action Release
+.\serial_console.ps1 -Action DetectConnect
 .\serial_console.ps1 -Action AutoDetect
-.\serial_console.ps1 -Action SwitchConnect
 .\serial_console.ps1 -Action Start
 .\serial_console.ps1 -Action Status
 .\serial_console.ps1 -Action Connect
