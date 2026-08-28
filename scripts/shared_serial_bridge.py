@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Shared serial bridge for human + agent access.
-
-One process owns the physical serial port and exposes a local TCP socket.
-Humans connect with the interactive client; agents connect with `send`.
-"""
+"""Share one serial port between an interactive terminal and command senders."""
 
 import argparse
 import os
@@ -13,99 +9,142 @@ import sys
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 import serial
 
 
-def encode_line_ending(mode):
-    endings = {
-        "cr": "\r",
-        "lf": "\n",
-        "crlf": "\r\n",
-    }
-    return endings[mode]
+LINE_ENDINGS = {"cr": "\r", "lf": "\n", "crlf": "\r\n"}
+BACKSPACES = {"bs": "\x08", "del": "\x7f"}
 
 
-def encode_backspace(mode):
-    mappings = {
-        "bs": "\x08",
-        "del": "\x7f",
-    }
-    return mappings[mode]
+def close_socket(sock):
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
-def recv_until_idle(sock, idle_seconds, max_seconds):
-    data = bytearray()
-    end = time.time() + max_seconds
-    last_rx = time.time()
-    while time.time() < end:
-        try:
-            chunk = sock.recv(4096)
-        except socket.timeout:
-            if time.time() - last_rx >= idle_seconds:
-                break
-            continue
-        if not chunk:
-            break
-        data.extend(chunk)
-        last_rx = time.time()
-    return bytes(data)
+def open_serial(port, baud):
+    # serial_for_url also accepts normal COM names and lets us test with loop://.
+    return serial.serial_for_url(port, baudrate=baud, timeout=0.05)
 
 
 def run_bridge(args):
-    ser = serial.Serial(args.port, args.baud, timeout=0.05)
-    if args.reset_dtr:
-        ser.dtr = False
-        time.sleep(0.3)
-        ser.dtr = True
-        time.sleep(2)
-        ser.reset_input_buffer()
-
+    serial_port = open_serial(args.port, args.baud)
+    state = {"serial": serial_port}
+    serial_lock = threading.Lock()
     clients = []
-    lock = threading.Lock()
-    logfile = args.log or f"serial_{args.port}_{datetime.now():%Y%m%d_%H%M%S}.log"
+    clients_lock = threading.Lock()
+    stop = threading.Event()
+
+    log_path = Path(args.log or f"serial_{args.port}_{datetime.now():%Y%m%d_%H%M%S}.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def get_serial():
+        with serial_lock:
+            return state["serial"]
+
+    def disconnect_clients():
+        with clients_lock:
+            old_clients = clients[:]
+            clients.clear()
+        for client in old_clients:
+            close_socket(client)
+
+    def invalidate_serial(failed_port):
+        with serial_lock:
+            if state["serial"] is not failed_port:
+                return
+            state["serial"] = None
+        try:
+            failed_port.close()
+        except (OSError, serial.SerialException):
+            pass
+        disconnect_clients()
+        print(f"serial_disconnected port={args.port}; retrying", flush=True)
+
+    def reconnect_serial():
+        while not stop.is_set() and get_serial() is None:
+            try:
+                reopened = open_serial(args.port, args.baud)
+            except (OSError, serial.SerialException):
+                stop.wait(1)
+                continue
+            with serial_lock:
+                if state["serial"] is None:
+                    state["serial"] = reopened
+                    print(f"serial_reconnected port={args.port} baud={args.baud}", flush=True)
+                    return reopened
+            reopened.close()
+        return get_serial()
 
     def broadcast(data):
-        with lock:
-            for client in clients[:]:
-                try:
-                    client.sendall(data)
-                except OSError:
-                    clients.remove(client)
+        with clients_lock:
+            current_clients = clients[:]
+        for client in current_clients:
+            try:
+                client.sendall(data)
+            except OSError:
+                with clients_lock:
+                    if client in clients:
+                        clients.remove(client)
+                close_socket(client)
 
     def serial_reader():
-        with open(logfile, "ab") as log:
-            while True:
+        with log_path.open("ab") as log_file:
+            while not stop.is_set():
+                current = get_serial() or reconnect_serial()
+                if current is None:
+                    continue
                 try:
-                    data = ser.read(4096)
-                except OSError:
-                    break
+                    data = current.read(4096)
+                except (OSError, serial.SerialException):
+                    invalidate_serial(current)
+                    continue
                 if data:
-                    log.write(data)
-                    log.flush()
+                    log_file.write(data)
+                    log_file.flush()
                     broadcast(data)
 
     def client_handler(conn):
-        with lock:
+        conn.settimeout(0.5)
+        with clients_lock:
             clients.append(conn)
         try:
-            while True:
-                data = conn.recv(4096)
+            while not stop.is_set():
+                try:
+                    data = conn.recv(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
                 if not data:
                     break
-                if args.chardelay:
-                    for byte in data:
-                        ser.write(bytes([byte]))
-                        time.sleep(args.chardelay)
-                else:
-                    ser.write(data)
-        except OSError:
-            pass
+                current = get_serial()
+                if current is None:
+                    break
+                try:
+                    if args.chardelay:
+                        for byte in data:
+                            current.write(bytes([byte]))
+                            time.sleep(args.chardelay)
+                    else:
+                        current.write(data)
+                except (OSError, serial.SerialException):
+                    invalidate_serial(current)
+                    break
         finally:
-            with lock:
+            with clients_lock:
                 if conn in clients:
                     clients.remove(conn)
-            conn.close()
+            close_socket(conn)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -115,7 +154,8 @@ def run_bridge(args):
 
     threading.Thread(target=serial_reader, daemon=True).start()
     print(
-        f"bridge_start port={args.port} baud={args.baud} tcp={args.host}:{args.tcp} log={logfile}",
+        f"bridge_start port={args.port} baud={args.baud} "
+        f"tcp={args.host}:{args.tcp} log={log_path}",
         flush=True,
     )
     try:
@@ -125,75 +165,127 @@ def run_bridge(args):
             except socket.timeout:
                 continue
             threading.Thread(target=client_handler, args=(conn,), daemon=True).start()
+    except KeyboardInterrupt:
+        pass
     finally:
-        ser.close()
+        stop.set()
+        current = get_serial()
+        if current is not None:
+            current.close()
+        disconnect_clients()
         server.close()
+
+
+def receive_until_idle(sock, idle_seconds, max_seconds):
+    output = bytearray()
+    disconnected = False
+    deadline = time.monotonic() + max_seconds
+    last_receive = time.monotonic()
+    while time.monotonic() < deadline:
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            if time.monotonic() - last_receive >= idle_seconds:
+                break
+            continue
+        if not chunk:
+            disconnected = True
+            break
+        output.extend(chunk)
+        last_receive = time.monotonic()
+    return bytes(output), disconnected
 
 
 def run_send(args):
     payload = args.data
     if args.newline:
-        payload += encode_line_ending(args.line_ending)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        payload += LINE_ENDINGS[args.line_ending]
+    sock = socket.create_connection((args.host, args.tcp), timeout=args.socket_timeout)
     sock.settimeout(args.socket_timeout)
-    sock.connect((args.host, args.tcp))
     if payload:
         sock.sendall(payload.encode(args.encoding))
-    out = recv_until_idle(sock, args.idle, args.max_wait)
-    sock.close()
-    sys.stdout.write(out.decode(args.encoding, errors="replace"))
+    output, disconnected = receive_until_idle(sock, args.idle, args.max_wait)
+    close_socket(sock)
+    sys.stdout.write(output.decode(args.encoding, errors="replace"))
+    if disconnected:
+        sys.stderr.write("[bridge] disconnected before response became idle\n")
+        return 2
+    return 0
 
 
 def run_connect(args):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(0.05)
-    sock.connect((args.host, args.tcp))
-    print(f"connected {args.host}:{args.tcp}; Ctrl+C exits")
+    stop = threading.Event()
+    socket_lock = threading.Lock()
+    socket_state = {"socket": None}
+    connected_once = False
 
-    def send_text(text):
-        if not text:
-            return
-        sock.sendall(text.encode(args.encoding))
+    def get_socket():
+        with socket_lock:
+            return socket_state["socket"]
+
+    def set_socket(value):
+        with socket_lock:
+            socket_state["socket"] = value
+
+    def drop_socket(failed_socket):
+        with socket_lock:
+            if socket_state["socket"] is failed_socket:
+                socket_state["socket"] = None
+        close_socket(failed_socket)
 
     def send_bytes(data):
-        if not data:
+        current = get_socket()
+        if current is None:
+            print("\n[bridge] disconnected; input discarded", flush=True)
             return
-        sock.sendall(data)
+        try:
+            current.sendall(data)
+        except OSError:
+            drop_socket(current)
+            print("\n[bridge] connection lost; reconnecting", flush=True)
 
     def translate_windows_key(first_char, get_char):
         if first_char == "\r":
-            return encode_line_ending(args.line_ending).encode(args.encoding)
+            return LINE_ENDINGS[args.line_ending].encode(args.encoding)
         if first_char == "\t":
             return b"\t"
         if first_char in ("\b", "\x7f"):
-            return encode_backspace(args.backspace_mode).encode(args.encoding)
+            return BACKSPACES[args.backspace_mode].encode(args.encoding)
         if first_char in ("\x00", "\xe0"):
             second = get_char()
-            special = {
-                "H": b"\x1b[A",  # Up
-                "P": b"\x1b[B",  # Down
-                "K": b"\x1b[D",  # Left
-                "M": b"\x1b[C",  # Right
-                "G": b"\x1b[H",  # Home
-                "O": b"\x1b[F",  # End
-                "S": b"\x1b[3~",  # Delete
-                "R": b"\x1b[2~",  # Insert
-                "I": b"\x1b[5~",  # Page Up
-                "Q": b"\x1b[6~",  # Page Down
-            }
-            return special.get(second, b"")
+            return {
+                "H": b"\x1b[A", "P": b"\x1b[B", "K": b"\x1b[D", "M": b"\x1b[C",
+                "G": b"\x1b[H", "O": b"\x1b[F", "S": b"\x1b[3~",
+            }.get(second, b"")
         return first_char.encode(args.encoding)
 
     def reader():
-        while True:
+        nonlocal connected_once
+        while not stop.is_set():
+            current = get_socket()
+            if current is None:
+                try:
+                    current = socket.create_connection((args.host, args.tcp), timeout=1)
+                except OSError:
+                    stop.wait(1)
+                    continue
+                current.settimeout(0.05)
+                set_socket(current)
+                state = "reconnected" if connected_once else "connected"
+                connected_once = True
+                print(f"{state} {args.host}:{args.tcp}; Ctrl+C exits", flush=True)
             try:
-                data = sock.recv(4096)
+                data = current.recv(4096)
             except socket.timeout:
                 continue
             except OSError:
-                break
+                data = b""
             if not data:
-                break
+                drop_socket(current)
+                if not stop.is_set():
+                    print("\n[bridge] disconnected; reconnecting", flush=True)
+                    stop.wait(1)
+                continue
             sys.stdout.write(data.decode(args.encoding, errors="replace"))
             sys.stdout.flush()
 
@@ -204,78 +296,74 @@ def run_connect(args):
 
             while True:
                 if msvcrt.kbhit():
-                    ch = msvcrt.getwch()
-                    if ch == "\x03":
+                    char = msvcrt.getwch()
+                    if char == "\x03":
                         break
-                    send_bytes(translate_windows_key(ch, msvcrt.getwch))
+                    send_bytes(translate_windows_key(char, msvcrt.getwch))
                 time.sleep(0.01)
         else:
             while True:
                 ready, _, _ = select.select([sys.stdin], [], [], 0.1)
-                if ready:
-                    data = os.read(sys.stdin.fileno(), 1024)
-                    if not data:
-                        break
-                    if b"\x03" in data:
-                        break
-                    data = data.replace(
-                        b"\x7f", encode_backspace(args.backspace_mode).encode(args.encoding)
-                    )
-                    if args.line_ending != "lf":
-                        data = data.replace(b"\n", encode_line_ending(args.line_ending).encode(args.encoding))
-                    send_bytes(data)
+                if not ready:
+                    continue
+                data = os.read(sys.stdin.fileno(), 1024)
+                if not data or b"\x03" in data:
+                    break
+                data = data.replace(b"\x7f", BACKSPACES[args.backspace_mode].encode())
+                if args.line_ending != "lf":
+                    data = data.replace(b"\n", LINE_ENDINGS[args.line_ending].encode())
+                send_bytes(data)
     except KeyboardInterrupt:
         pass
     finally:
-        sock.close()
+        stop.set()
+        close_socket(get_socket())
         print("\ndisconnected")
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Shared serial bridge for human + agent access")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    parser = argparse.ArgumentParser(description="Shared serial bridge")
+    commands = parser.add_subparsers(dest="command", required=True)
 
-    bridge = sub.add_parser("bridge", help="own the serial port and expose a local TCP bridge")
+    bridge = commands.add_parser("bridge", help="own a serial port and expose TCP")
     bridge.add_argument("--port", required=True)
     bridge.add_argument("--baud", type=int, required=True)
     bridge.add_argument("--host", default="127.0.0.1")
     bridge.add_argument("--tcp", type=int, default=8888)
     bridge.add_argument("--chardelay", type=float, default=0.0)
     bridge.add_argument("--log")
-    bridge.add_argument("--reset-dtr", action="store_true")
     bridge.set_defaults(func=run_bridge)
 
-    connect = sub.add_parser("connect", help="interactive human terminal for a running bridge")
+    connect = commands.add_parser("connect", help="open an interactive terminal")
     connect.add_argument("--host", default="127.0.0.1")
     connect.add_argument("--tcp", type=int, default=8888)
     connect.add_argument("--encoding", default="utf-8")
-    connect.add_argument("--line-ending", choices=["cr", "lf", "crlf"], default="cr")
-    connect.add_argument(
-        "--backspace-mode",
-        choices=["bs", "del"],
-        default="bs",
-        help="bytes sent when Backspace is pressed",
-    )
+    connect.add_argument("--line-ending", choices=LINE_ENDINGS, default="cr")
+    connect.add_argument("--backspace-mode", choices=BACKSPACES, default="bs")
     connect.set_defaults(func=run_connect)
 
-    send = sub.add_parser("send", help="agent command sender for a running bridge")
+    send = commands.add_parser("send", help="send one command through the bridge")
     send.add_argument("data", nargs="?", default="")
     send.add_argument("--host", default="127.0.0.1")
     send.add_argument("--tcp", type=int, default=8888)
     send.add_argument("--encoding", default="utf-8")
     send.add_argument("--newline", action="store_true")
-    send.add_argument("--line-ending", choices=["cr", "lf", "crlf"], default="cr")
+    send.add_argument("--line-ending", choices=LINE_ENDINGS, default="cr")
     send.add_argument("--idle", type=float, default=0.8)
     send.add_argument("--max-wait", type=float, default=5.0)
     send.add_argument("--socket-timeout", type=float, default=0.2)
     send.set_defaults(func=run_send)
-
     return parser
 
 
 def main():
     args = build_parser().parse_args()
-    args.func(args)
+    try:
+        result = args.func(args)
+    except KeyboardInterrupt:
+        result = 130
+    if isinstance(result, int):
+        raise SystemExit(result)
 
 
 if __name__ == "__main__":

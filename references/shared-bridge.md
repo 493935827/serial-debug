@@ -4,6 +4,16 @@ Use the bundled bridge when a human and agent need the same local serial port at
 
 The bridge process owns the physical port. Human terminals and agent senders connect to `127.0.0.1:<tcp>`.
 
+## Manual Windows Menu
+
+For a persistent bridge that the human can start and stop without an agent, double-click:
+
+```powershell
+windows\serial_console.cmd
+```
+
+Set the COM port and baud rate in `windows/serial_config.psd1`. The menu can list ports, start or stop the hidden bridge, open the interactive terminal, send one command, and open the log directory. Closing the menu leaves the bridge running; menu item `4` stops it and releases the physical port.
+
 ## Start The Bridge
 
 ```bash
