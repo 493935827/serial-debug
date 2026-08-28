@@ -7,6 +7,7 @@ Shared serial debugging can change device state. Be explicit about the console n
 - Confirm the selected console comes from Conserver status output.
 - Confirm voltage compatibility between the adapter and target board. Do not assume 5 V tolerance.
 - Confirm the protocol baud rate, data bits, parity, stop bits, and flow control.
+- Automatic baud detection must be passive by default: listen for target output, do not send probe commands or toggle break/DTR/RTS. If the target is silent, report that detection needs target output instead of guessing. Tell the user before asking them to reset or power-cycle the target.
 - Avoid sending reset, erase, bootloader, or firmware-update commands unless the user requested that operation.
 
 ## RTS and DTR

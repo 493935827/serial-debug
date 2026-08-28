@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet("Menu", "Start", "Stop", "Release", "Status", "Connect", "Send", "Ports", "AutoDetect", "DetectConnect")]
+    [ValidateSet("Menu", "Start", "Stop", "Release", "Status", "Connect", "Send", "Ports", "AutoDetect", "DetectConnect", "AutoBaud")]
     [string]$Action = "Menu",
     [string]$Command
 )
@@ -11,6 +11,7 @@ $DefaultConfigPath = Join-Path $ToolDir "serial_config.psd1"
 $LocalConfigPath = Join-Path $ToolDir "serial_config.local.psd1"
 $BridgePath = Join-Path $ToolDir "..\scripts\shared_serial_bridge.py"
 $DetectorPath = Join-Path $ToolDir "detect_serial_port.py"
+$BaudDetectorPath = Join-Path $ToolDir "detect_serial_baud.py"
 $RuntimeDir = Join-Path $ToolDir ".runtime"
 $PidPath = Join-Path $RuntimeDir "bridge.pid"
 $DiagnosticLog = Join-Path $RuntimeDir "bridge_diagnostic.log"
@@ -51,6 +52,19 @@ function Set-LocalSerialPort([string]$PortName) {
     }
     $Replacement = '$1"' + $PortName + '"'
     $Updated = [regex]::Replace($Content, $Pattern, $Replacement, 1)
+    # Windows PowerShell 5 需要 UTF-8 BOM，才能可靠解析中文注释。
+    $Utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText($TargetPath, $Updated, $Utf8Bom)
+}
+
+function Set-LocalBaud([int]$Baud) {
+    $TargetPath = Initialize-LocalConfig
+    $Content = Get-Content -LiteralPath $TargetPath -Raw
+    $Pattern = '(?m)^(\s*Baud\s*=\s*)\d+'
+    if (-not [regex]::IsMatch($Content, $Pattern)) {
+        throw "配置文件中找不到 Baud 字段：$TargetPath"
+    }
+    $Updated = [regex]::Replace($Content, $Pattern, ('${1}' + [string]$Baud), 1)
     # Windows PowerShell 5 需要 UTF-8 BOM，才能可靠解析中文注释。
     $Utf8Bom = New-Object System.Text.UTF8Encoding($true)
     [System.IO.File]::WriteAllText($TargetPath, $Updated, $Utf8Bom)
@@ -204,6 +218,51 @@ function Find-NextSerialPort {
     return $PortName
 }
 
+function Find-SerialBaud {
+    $Config = Get-SerialConfig
+    if ($null -ne (Get-BridgeProcess)) {
+        throw "当前串口仍被本工具占用，请先选择菜单 4 释放当前 COM 口。"
+    }
+    if (Test-TcpEndpoint $Config.Host $Config.TcpPort) {
+        throw "共享地址 $($Config.Host):$($Config.TcpPort) 已被占用，请先释放占用后再检测波特率。"
+    }
+    Assert-PythonAndPySerial $Config
+
+    $DefaultBauds = @(115200, 57600, 38400, 19200, 9600, 230400, 460800, 921600)
+    $BaudCandidates = if ($null -ne $Config.BaudCandidates) {
+        @([int]$Config.Baud) + @($Config.BaudCandidates | ForEach-Object { [int]$_ }) | Select-Object -Unique
+    } else {
+        @([int]$Config.Baud) + $DefaultBauds | Select-Object -Unique
+    }
+    $SampleSeconds = if ($null -ne $Config.BaudSampleSeconds) { [double]$Config.BaudSampleSeconds } else { 0.8 }
+    $Rounds = if ($null -ne $Config.BaudRounds) { [int]$Config.BaudRounds } else { 3 }
+
+    Write-Host "正在被动检测 $($Config.Port) 的波特率，不会向设备发送数据。" -ForegroundColor Cyan
+    Write-Host "请让设备持续输出日志；如果只在启动时输出，请在检测期间反复按开发板复位键。"
+    Write-Host "候选波特率：$($BaudCandidates -join ', ')"
+    $DetectedBaud = & $Config.Python $BaudDetectorPath --port $Config.Port `
+        --bauds ($BaudCandidates -join ",") --seconds $SampleSeconds --rounds $Rounds
+    $DetectorExitCode = $LASTEXITCODE
+    if ($DetectorExitCode -eq 130) {
+        Write-Host "已取消波特率检测。" -ForegroundColor Yellow
+        return
+    }
+    if ($DetectorExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($DetectedBaud)) {
+        if ($DetectorExitCode -eq 2) {
+            throw "没有收到足够的有效输出。请让设备持续打印，或在检测期间反复复位后重试。"
+        }
+        if ($DetectorExitCode -eq 3) {
+            throw "多个候选结果过于接近，无法可靠判断。请增加输出量后重试，或手动设置波特率。"
+        }
+        throw "波特率检测失败，请确认串口未被其他软件占用。"
+    }
+    $Baud = [int]([string]$DetectedBaud).Trim()
+    Set-LocalBaud $Baud
+    Write-Host "已检测到波特率：$Baud" -ForegroundColor Green
+    Write-Host "已写入本地配置；需要选择菜单 1 启动串口桥。" -ForegroundColor Green
+    return $Baud
+}
+
 function Detect-AndConnectNextSerialPort {
     $CurrentConfig = Get-SerialConfig
     if ($null -ne (Get-BridgeProcess)) {
@@ -263,6 +322,7 @@ function Show-Menu {
         Write-Host "7. 查看当前串口"
         Write-Host "8. 编辑本地配置"
         Write-Host "9. 打开日志目录"
+        Write-Host "10. 自动检测当前串口的波特率"
         Write-Host "0. 退出菜单（后台串口桥保持运行）"
         Write-Host ""
         $Choice = Read-Host "请选择"
@@ -280,6 +340,7 @@ function Show-Menu {
                     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
                     Start-Process explorer.exe $LogDir
                 }
+                "10" { Find-SerialBaud | Out-Null }
                 "0" { return }
                 default { Write-Host "无法识别该选项。" -ForegroundColor Yellow }
             }
@@ -306,6 +367,7 @@ switch ($Action) {
     }
     "Ports"      { Show-SerialPorts }
     "AutoDetect" { Find-NextSerialPort | Out-Null }
+    "AutoBaud"   { Find-SerialBaud | Out-Null }
     "DetectConnect" { Detect-AndConnectNextSerialPort }
     default      { Show-Menu }
 }
