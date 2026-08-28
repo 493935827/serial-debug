@@ -1,46 +1,74 @@
-# Shared Serial Console
+# 共享串口工具
 
-这是一个适合 Windows 的简单串口工具。后台桥接进程独占物理 COM 口，再把数据转发到本机 TCP 端口。这样你打开的终端和自动化命令可以同时访问同一个串口，不需要反复关闭、重开串口软件。
+这是一个适合 Windows 的中文串口工具。后台串口桥独占物理 COM 口，再把数据转发到本机 TCP 端口，让人工终端和自动化命令可以同时访问同一个串口。
+
+交互终端直接使用成熟的 [pySerial miniterm](https://github.com/pyserial/pyserial/blob/master/serial/tools/miniterm.py)；外层保留本项目需要的中文菜单、手动开关、共享访问、自动检测、单条命令和日志功能。pySerial 使用 [BSD-3-Clause 许可证](https://github.com/pyserial/pyserial/blob/master/LICENSE.txt)，本项目通过依赖调用它，没有复制许可证不明的代码。
 
 ## 第一次使用
 
 1. 双击 `serial_console.cmd`。
-2. 选择 `5` 查看当前串口号。
-3. 选择 `6`，把 `serial_config.psd1` 中的 `Port` 和 `Baud` 改成开发板的实际参数并保存。
-4. 选择 `1` 启动桥接。
-5. 选择 `2` 打开交互终端。终端中按 `Ctrl+C` 只退出终端，不会停止后台桥接。
-6. 回到菜单选择 `4`，才会真正关闭串口并释放 COM 口。
+2. 选择 `5`，然后插入 USB-UART。工具会识别下一次接入的串口，并保存到本地配置。
+3. 如需修改波特率，选择 `7` 编辑本地配置。
+4. 选择 `1` 启动串口桥。
+5. 选择 `2` 打开交互终端。
+6. 终端中按 `Ctrl+C` 返回菜单；后台串口桥不会停止。
+7. 回到菜单选择 `4`，真正关闭串口桥并释放 COM 口。
 
-菜单本身可以随时关闭；只要没有选择 `4`，后台桥接仍会继续运行。再次双击脚本即可查看状态、打开终端或停止它。
+菜单窗口可以随时关闭；只要没有选择 `4`，后台串口桥就会继续运行。再次双击脚本即可查看状态、打开终端或停止它。
+
+## 自动检测下一次接入的串口
+
+菜单选项 `5` 会先记录当前串口列表，再等待最多 120 秒：
+
+- 目标 USB-UART 尚未插入时，直接选择该功能，然后插入设备。
+- 目标设备已经插入时，选择该功能后将它拔出再插入。
+- 如果一次出现多个端口，优先选择带 USB VID/PID 的非蓝牙端口。
+- 检测成功后，端口号写入 `serial_config.local.psd1`。
+- 如果串口桥正在运行，新端口会在下一次停止并重新启动后生效。
+- 等待期间按 `Ctrl+C` 可以取消。
+
+本地配置已加入 `.gitignore`，不会把个人 COM 号提交到 GitHub。
 
 ## 配置说明
 
-配置文件是 `serial_config.psd1`：
+`serial_config.psd1` 是受 Git 管理的默认模板；自动检测或菜单选项 `7` 会创建 `serial_config.local.psd1`，工具优先读取本地配置。
 
 - `Port`：串口号，例如 `COM10`。
 - `Baud`：波特率，例如 `57600` 或 `115200`。
 - `LineEnding`：按 Enter 时发送的换行符。嵌入式 Shell 常用 `cr`；若命令不执行，可尝试 `crlf` 或 `lf`。
 - `CharDelay`：逐字节发送间隔。较慢的 Shell 可以保留默认 `0.005`，高速可靠链路可设为 `0`。
-- `TcpPort`：共享桥接的本机 TCP 端口，默认 `8888`。
+- `TcpPort`：共享串口桥的本机 TCP 端口，默认 `8888`。
 
 默认监听 `127.0.0.1`，只有本机可以连接。工具不会主动切换 DTR/RTS，因此不会故意触发复位或 Boot 模式。
 
-## 命令行用法
+## 交互终端
 
-除了双击菜单，也可以在 PowerShell 中执行：
+菜单选项 `2` 通过 pySerial miniterm 连接后台串口桥：
+
+- `Ctrl+C`：退出人工终端，后台串口桥继续运行。
+- `Ctrl+T` 后按 `Ctrl+H`：查看 miniterm 快捷键。
+- `Ctrl+T` 后按 `Ctrl+E`：切换本地回显。
+- `Ctrl+T` 后按 `Ctrl+L`：切换换行方式。
+- Enter 使用配置中的 `LineEnding`。
+
+## PowerShell 命令
+
+除了双击菜单，也可以执行：
 
 ```powershell
+.\serial_console.ps1 -Action AutoDetect
 .\serial_console.ps1 -Action Start
 .\serial_console.ps1 -Action Status
 .\serial_console.ps1 -Action Connect
 .\serial_console.ps1 -Action Send -Command "help"
+.\serial_console.ps1 -Action Ports
 .\serial_console.ps1 -Action Stop
 ```
 
 ## 日志和故障排查
 
-- 串口接收到的原始数据保存在 `logs` 目录。
-- 桥接启动诊断保存在 `.runtime` 目录。
+- 串口收到的原始数据保存在 `logs` 目录。
+- 串口桥启动诊断保存在 `.runtime` 目录。
 - 如果提示找不到 `serial` 模块，执行：
 
 ```powershell
@@ -48,10 +76,9 @@ python -m pip install -r requirements.txt
 ```
 
 - 如果提示 COM 口被占用，请先关闭其他直接打开该串口的软件。
-- 拔插 USB 串口后，桥接会每秒尝试重连；终端也会自动重连。
-- 如果某条会修改设备状态的命令发送中途断线，不要立即盲目重发，先从终端或日志确认设备状态。
+- 拔插 USB 串口后，串口桥会每秒尝试重连。
+- 如果会修改设备状态的命令发送中途断线，先从终端或日志确认设备状态，再决定是否重发。
 
 ## 硬件安全
 
-连接前确认 USB-UART 与芯片 IO 电平兼容（常见是 3.3 V，但不要凭经验假设），并确认波特率、数据位、校验位和停止位。当前工具使用 pyserial 的默认 `8-N-1`、无流控配置。擦除、烧写、复位和进入 Bootloader 等动作仍需要你明确确认后再执行。
-
+连接前确认 USB-UART 与芯片 IO 电平兼容，并确认波特率、数据位、校验位和停止位。当前工具使用 pySerial 默认的 `8-N-1`、无流控配置。擦除、烧写、复位和进入 Bootloader 等动作仍需要明确确认后再执行。

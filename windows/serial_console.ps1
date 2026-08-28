@@ -1,25 +1,59 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [ValidateSet("Menu", "Start", "Stop", "Status", "Connect", "Send", "Ports")]
+    [ValidateSet("Menu", "Start", "Stop", "Status", "Connect", "Send", "Ports", "AutoDetect")]
     [string]$Action = "Menu",
     [string]$Command
 )
 
 $ErrorActionPreference = "Stop"
 $ToolDir = Split-Path -Parent $PSCommandPath
-$ConfigPath = Join-Path $ToolDir "serial_config.psd1"
+$DefaultConfigPath = Join-Path $ToolDir "serial_config.psd1"
+$LocalConfigPath = Join-Path $ToolDir "serial_config.local.psd1"
 $BridgePath = Join-Path $ToolDir "..\scripts\shared_serial_bridge.py"
+$DetectorPath = Join-Path $ToolDir "detect_serial_port.py"
 $RuntimeDir = Join-Path $ToolDir ".runtime"
 $PidPath = Join-Path $RuntimeDir "bridge.pid"
 $DiagnosticLog = Join-Path $RuntimeDir "bridge_diagnostic.log"
 $DiagnosticErrorLog = Join-Path $RuntimeDir "bridge_error.log"
 $LogDir = Join-Path $ToolDir "logs"
 
+function Get-ActiveConfigPath {
+    if (Test-Path -LiteralPath $LocalConfigPath) { return $LocalConfigPath }
+    return $DefaultConfigPath
+}
+
 function Get-SerialConfig {
-    if (-not (Test-Path -LiteralPath $ConfigPath)) {
-        throw "Config file not found: $ConfigPath"
+    $ActiveConfigPath = Get-ActiveConfigPath
+    if (-not (Test-Path -LiteralPath $ActiveConfigPath)) {
+        throw "找不到配置文件：$ActiveConfigPath"
     }
-    return Import-PowerShellDataFile -LiteralPath $ConfigPath
+    $ConfigText = Get-Content -LiteralPath $ActiveConfigPath -Raw -Encoding UTF8
+    $Config = & ([scriptblock]::Create($ConfigText))
+    if ($Config -isnot [System.Collections.IDictionary]) {
+        throw "配置文件必须返回哈希表：$ActiveConfigPath"
+    }
+    return $Config
+}
+
+function Initialize-LocalConfig {
+    if (-not (Test-Path -LiteralPath $LocalConfigPath)) {
+        Copy-Item -LiteralPath $DefaultConfigPath -Destination $LocalConfigPath
+    }
+    return $LocalConfigPath
+}
+
+function Set-LocalSerialPort([string]$PortName) {
+    $TargetPath = Initialize-LocalConfig
+    $Content = Get-Content -LiteralPath $TargetPath -Raw
+    $Pattern = '(?m)^(\s*Port\s*=\s*)"[^"]*"'
+    if (-not [regex]::IsMatch($Content, $Pattern)) {
+        throw "配置文件中找不到 Port 字段：$TargetPath"
+    }
+    $Replacement = '$1"' + $PortName + '"'
+    $Updated = [regex]::Replace($Content, $Pattern, $Replacement, 1)
+    # Windows PowerShell 5 需要 UTF-8 BOM，才能可靠解析中文注释。
+    $Utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText($TargetPath, $Updated, $Utf8Bom)
 }
 
 function Get-BridgeProcess {
@@ -46,7 +80,7 @@ function Test-TcpEndpoint([string]$HostName, [int]$PortNumber) {
 function Assert-PythonAndPySerial($Config) {
     & $Config.Python -c "import serial" 2>$null
     if ($LASTEXITCODE -ne 0) {
-        throw "pyserial is missing. Run: $($Config.Python) -m pip install -r `"$ToolDir\requirements.txt`""
+        throw "缺少 pyserial。请执行：$($Config.Python) -m pip install -r `"$ToolDir\requirements.txt`""
     }
 }
 
@@ -54,7 +88,7 @@ function Start-SerialBridge {
     $Config = Get-SerialConfig
     $Existing = Get-BridgeProcess
     if ($null -ne $Existing) {
-        Write-Host "Bridge is already running (PID $($Existing.ProcessId))." -ForegroundColor Yellow
+        Write-Host "串口桥已经在运行（PID $($Existing.ProcessId)）。" -ForegroundColor Yellow
         return
     }
     Assert-PythonAndPySerial $Config
@@ -81,109 +115,168 @@ function Start-SerialBridge {
         Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
         $Details = if (Test-Path -LiteralPath $DiagnosticErrorLog) {
             Get-Content -LiteralPath $DiagnosticErrorLog -Raw
-        } else { "No diagnostic output." }
-        throw "Bridge failed to start. Check the COM port and baud rate.`n$Details"
+        } else { "没有诊断输出。" }
+        throw "串口桥启动失败，请检查 COM 口、波特率以及串口是否被其他软件占用。`n$Details"
     }
-    Write-Host "Started: $($Config.Port) @ $($Config.Baud) baud" -ForegroundColor Green
-    Write-Host "Shared endpoint: $($Config.Host):$($Config.TcpPort)"
-    Write-Host "PID: $($Running.ProcessId)"
-    Write-Host "Serial log: $SerialLog"
+    Write-Host "已启动：$($Config.Port)，$($Config.Baud) 波特" -ForegroundColor Green
+    Write-Host "共享地址：$($Config.Host):$($Config.TcpPort)"
+    Write-Host "进程 PID：$($Running.ProcessId)"
+    Write-Host "串口日志：$SerialLog"
 }
 
 function Stop-SerialBridge {
     $Running = Get-BridgeProcess
     if ($null -eq $Running) {
-        Write-Host "Bridge is not running." -ForegroundColor Yellow
+        Write-Host "串口桥当前没有运行。" -ForegroundColor Yellow
         return
     }
     Stop-Process -Id $Running.ProcessId -Force
     Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Stopped bridge PID $($Running.ProcessId)." -ForegroundColor Green
+    Write-Host "已停止串口桥（PID $($Running.ProcessId)），COM 口已释放。" -ForegroundColor Green
 }
 
 function Show-SerialStatus {
     $Config = Get-SerialConfig
     $Running = Get-BridgeProcess
-    Write-Host "Port:       $($Config.Port)"
-    Write-Host "Baud:       $($Config.Baud)"
-    Write-Host "Endpoint:   $($Config.Host):$($Config.TcpPort)"
-    Write-Host "Line ending: $($Config.LineEnding)"
+    $ConfigKind = if (Test-Path -LiteralPath $LocalConfigPath) { "本地配置" } else { "默认配置" }
+    Write-Host "串口：     $($Config.Port)"
+    Write-Host "波特率：   $($Config.Baud)"
+    Write-Host "共享地址： $($Config.Host):$($Config.TcpPort)"
+    Write-Host "换行方式： $($Config.LineEnding)"
+    Write-Host "配置来源： $ConfigKind"
     if ($null -eq $Running) {
-        Write-Host "State:      STOPPED" -ForegroundColor Yellow
+        Write-Host "运行状态： 已停止" -ForegroundColor Yellow
     } else {
-        Write-Host "State:      RUNNING (PID $($Running.ProcessId))" -ForegroundColor Green
+        Write-Host "运行状态： 运行中（PID $($Running.ProcessId)）" -ForegroundColor Green
     }
 }
 
 function Show-SerialPorts {
     $Config = Get-SerialConfig
     Assert-PythonAndPySerial $Config
-    Write-Host "Detected serial ports:" -ForegroundColor Cyan
-    & $Config.Python -m serial.tools.list_ports -v
+    Write-Host "当前检测到的串口：" -ForegroundColor Cyan
+    $JsonLines = @(& $Config.Python $DetectorPath --list-json)
+    if ($LASTEXITCODE -ne 0) { throw "读取串口列表失败。" }
+    $Ports = @($JsonLines | ForEach-Object { $_ | ConvertFrom-Json })
+    if ($Ports.Count -eq 0) {
+        Write-Host "没有检测到串口。" -ForegroundColor Yellow
+        return
+    }
+    foreach ($Port in $Ports) {
+        Write-Host "- 串口：$($Port.device)" -ForegroundColor Green
+        Write-Host "  说明：$($Port.description)"
+        Write-Host "  硬件 ID：$($Port.hwid)"
+        if ($null -ne $Port.vid -and $null -ne $Port.pid) {
+            Write-Host ("  USB VID:PID：{0:X4}:{1:X4}" -f [int]$Port.vid, [int]$Port.pid)
+        }
+    }
+}
+
+function Find-NextSerialPort {
+    $Config = Get-SerialConfig
+    Assert-PythonAndPySerial $Config
+    Write-Host "已记录当前串口列表。" -ForegroundColor Cyan
+    Write-Host "请在 120 秒内插入 USB 串口；也可以先拔出目标串口，再重新插入。"
+    Write-Host "等待期间按 Ctrl+C 可以取消。"
+    $DetectedPort = & $Config.Python $DetectorPath --timeout 120
+    $DetectorExitCode = $LASTEXITCODE
+    if ($DetectorExitCode -eq 130) {
+        Write-Host "已取消自动检测。" -ForegroundColor Yellow
+        return
+    }
+    if ($DetectorExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($DetectedPort)) {
+        throw "等待超时，没有检测到新接入的串口。"
+    }
+    $PortName = ([string]$DetectedPort).Trim()
+    Set-LocalSerialPort $PortName
+    Write-Host "已检测到串口：$PortName" -ForegroundColor Green
+    Write-Host "已写入本地配置，下次启动串口桥时会自动使用该端口。" -ForegroundColor Green
+    if ($null -ne (Get-BridgeProcess)) {
+        Write-Host "当前串口桥仍使用原端口；请先停止再启动，使新配置生效。" -ForegroundColor Yellow
+    }
+}
+
+function Edit-SerialConfig {
+    $TargetPath = Initialize-LocalConfig
+    Start-Process notepad.exe -ArgumentList $TargetPath -Wait
 }
 
 function Open-SerialTerminal {
     $Config = Get-SerialConfig
-    if ($null -eq (Get-BridgeProcess)) { throw "Bridge is stopped. Start it first." }
-    Write-Host "Interactive terminal opened. Press Ctrl+C to return to the menu." -ForegroundColor Cyan
-    & $Config.Python $BridgePath connect --host $Config.Host --tcp $Config.TcpPort `
-        --encoding $Config.Encoding --line-ending $Config.LineEnding
+    if ($null -eq (Get-BridgeProcess)) { throw "串口桥已停止，请先启动。" }
+    $SocketUrl = "socket://$($Config.Host):$($Config.TcpPort)"
+    $MinitermEol = ([string]$Config.LineEnding).ToUpperInvariant()
+    Write-Host "已使用 pySerial 官方 miniterm 打开交互终端。" -ForegroundColor Cyan
+    Write-Host "按 Ctrl+C 返回菜单；按 Ctrl+T 后再按 Ctrl+H 查看终端快捷键。"
+    Write-Host "退出终端不会停止后台串口桥。"
+    & $Config.Python -m serial.tools.miniterm $SocketUrl $Config.Baud --quiet `
+        --encoding $Config.Encoding --eol $MinitermEol --exit-char 3
 }
 
 function Send-SerialCommand([string]$Text) {
     $Config = Get-SerialConfig
-    if ($null -eq (Get-BridgeProcess)) { throw "Bridge is stopped. Start it first." }
+    if ($null -eq (Get-BridgeProcess)) { throw "串口桥已停止，请先启动。" }
     & $Config.Python $BridgePath send $Text --host $Config.Host --tcp $Config.TcpPort `
         --encoding $Config.Encoding --line-ending $Config.LineEnding --newline
-    if ($LASTEXITCODE -ne 0) { throw "The command result is uncertain; inspect the terminal or log before retrying." }
+    if ($LASTEXITCODE -ne 0) {
+        throw "命令结果不确定，请先检查交互终端或日志，再决定是否重发。"
+    }
 }
 
 function Show-Menu {
     while ($true) {
         Clear-Host
-        Write-Host "========== Shared Serial Console ==========" -ForegroundColor Cyan
+        Write-Host "========== 共享串口工具 ==========" -ForegroundColor Cyan
         Show-SerialStatus
         Write-Host ""
-        Write-Host "1. Start bridge"
-        Write-Host "2. Open interactive terminal"
-        Write-Host "3. Send one command"
-        Write-Host "4. Stop bridge"
-        Write-Host "5. List serial ports"
-        Write-Host "6. Edit configuration"
-        Write-Host "7. Open log folder"
-        Write-Host "0. Exit menu (bridge keeps running)"
+        Write-Host "1. 启动串口桥"
+        Write-Host "2. 打开交互终端"
+        Write-Host "3. 发送单条命令"
+        Write-Host "4. 停止串口桥并释放 COM 口"
+        Write-Host "5. 自动检测下次接入的串口"
+        Write-Host "6. 查看当前串口"
+        Write-Host "7. 编辑本地配置"
+        Write-Host "8. 打开日志目录"
+        Write-Host "0. 退出菜单（后台串口桥保持运行）"
         Write-Host ""
-        $Choice = Read-Host "Choose"
+        $Choice = Read-Host "请选择"
         try {
             switch ($Choice) {
                 "1" { Start-SerialBridge }
                 "2" { Open-SerialTerminal }
-                "3" { $Text = Read-Host "Command"; Send-SerialCommand $Text }
+                "3" { $Text = Read-Host "请输入命令"; Send-SerialCommand $Text }
                 "4" { Stop-SerialBridge }
-                "5" { Show-SerialPorts }
-                "6" { Start-Process notepad.exe -ArgumentList $ConfigPath -Wait }
-                "7" { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null; Start-Process explorer.exe $LogDir }
+                "5" { Find-NextSerialPort }
+                "6" { Show-SerialPorts }
+                "7" { Edit-SerialConfig }
+                "8" {
+                    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+                    Start-Process explorer.exe $LogDir
+                }
                 "0" { return }
-                default { Write-Host "Unknown option." -ForegroundColor Yellow }
+                default { Write-Host "无法识别该选项。" -ForegroundColor Yellow }
             }
         }
         catch {
-            Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "错误：$($_.Exception.Message)" -ForegroundColor Red
         }
-        if ($Choice -notin @("0", "2", "6", "7")) {
+        if ($Choice -notin @("0", "2", "7", "8")) {
             Write-Host ""
-            Read-Host "Press Enter to continue" | Out-Null
+            Read-Host "按 Enter 继续" | Out-Null
         }
     }
 }
 
 switch ($Action) {
-    "Start"   { Start-SerialBridge }
-    "Stop"    { Stop-SerialBridge }
-    "Status"  { Show-SerialStatus }
-    "Connect" { Open-SerialTerminal }
-    "Send"    { if ([string]::IsNullOrWhiteSpace($Command)) { throw "Use -Command to provide text." }; Send-SerialCommand $Command }
-    "Ports"   { Show-SerialPorts }
-    default   { Show-Menu }
+    "Start"      { Start-SerialBridge }
+    "Stop"       { Stop-SerialBridge }
+    "Status"     { Show-SerialStatus }
+    "Connect"    { Open-SerialTerminal }
+    "Send"       {
+        if ([string]::IsNullOrWhiteSpace($Command)) { throw "请通过 -Command 提供命令内容。" }
+        Send-SerialCommand $Command
+    }
+    "Ports"      { Show-SerialPorts }
+    "AutoDetect" { Find-NextSerialPort }
+    default      { Show-Menu }
 }
-

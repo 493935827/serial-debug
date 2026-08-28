@@ -208,7 +208,7 @@ def run_send(args):
     close_socket(sock)
     sys.stdout.write(output.decode(args.encoding, errors="replace"))
     if disconnected:
-        sys.stderr.write("[bridge] disconnected before response became idle\n")
+        sys.stderr.write("[串口桥] 响应稳定前连接已经断开\n")
         return 2
     return 0
 
@@ -236,13 +236,13 @@ def run_connect(args):
     def send_bytes(data):
         current = get_socket()
         if current is None:
-            print("\n[bridge] disconnected; input discarded", flush=True)
+            print("\n[串口桥] 当前未连接，本次输入已丢弃", flush=True)
             return
         try:
             current.sendall(data)
         except OSError:
             drop_socket(current)
-            print("\n[bridge] connection lost; reconnecting", flush=True)
+            print("\n[串口桥] 连接丢失，正在重新连接", flush=True)
 
     def translate_windows_key(first_char, get_char):
         if first_char == "\r":
@@ -271,7 +271,7 @@ def run_connect(args):
                     continue
                 current.settimeout(0.05)
                 set_socket(current)
-                state = "reconnected" if connected_once else "connected"
+                state = "已重新连接" if connected_once else "已连接"
                 connected_once = True
                 print(f"{state} {args.host}:{args.tcp}; Ctrl+C exits", flush=True)
             try:
@@ -283,7 +283,7 @@ def run_connect(args):
             if not data:
                 drop_socket(current)
                 if not stop.is_set():
-                    print("\n[bridge] disconnected; reconnecting", flush=True)
+                    print("\n[串口桥] 已断开，正在重新连接", flush=True)
                     stop.wait(1)
                 continue
             sys.stdout.write(data.decode(args.encoding, errors="replace"))
@@ -318,14 +318,14 @@ def run_connect(args):
     finally:
         stop.set()
         close_socket(get_socket())
-        print("\ndisconnected")
+        print("\n已退出串口终端")
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Shared serial bridge")
+    parser = argparse.ArgumentParser(description="共享串口桥")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    bridge = commands.add_parser("bridge", help="own a serial port and expose TCP")
+    bridge = commands.add_parser("bridge", help="独占串口并提供本机 TCP 共享端点")
     bridge.add_argument("--port", required=True)
     bridge.add_argument("--baud", type=int, required=True)
     bridge.add_argument("--host", default="127.0.0.1")
@@ -334,7 +334,7 @@ def build_parser():
     bridge.add_argument("--log")
     bridge.set_defaults(func=run_bridge)
 
-    connect = commands.add_parser("connect", help="open an interactive terminal")
+    connect = commands.add_parser("connect", help="打开交互串口终端")
     connect.add_argument("--host", default="127.0.0.1")
     connect.add_argument("--tcp", type=int, default=8888)
     connect.add_argument("--encoding", default="utf-8")
@@ -342,7 +342,7 @@ def build_parser():
     connect.add_argument("--backspace-mode", choices=BACKSPACES, default="bs")
     connect.set_defaults(func=run_connect)
 
-    send = commands.add_parser("send", help="send one command through the bridge")
+    send = commands.add_parser("send", help="通过串口桥发送一条命令")
     send.add_argument("data", nargs="?", default="")
     send.add_argument("--host", default="127.0.0.1")
     send.add_argument("--tcp", type=int, default=8888)
