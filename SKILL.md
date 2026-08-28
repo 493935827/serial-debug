@@ -72,3 +72,7 @@ console -S <CONSOLE>
 ## Reporting
 
 Report the shared endpoint, physical port, baud rate, command, exit status, and relevant output excerpt. If no hardware is connected, say that only bridge/client discovery was verified and mark device round-trip validation as manual.
+
+## Source Maintenance
+
+The canonical source is `https://github.com/493935827/serial-debug`. When the user requests changes to this skill, keep completed scripts and documentation synchronized to that repository and report the pushed commit URL. Keep local configuration, logs, Python caches, and runtime PID files out of Git.
