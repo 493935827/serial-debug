@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet("Menu", "Start", "Stop", "Status", "Connect", "Send", "Ports", "AutoDetect")]
+    [ValidateSet("Menu", "Start", "Stop", "Status", "Connect", "Send", "Ports", "AutoDetect", "SwitchConnect")]
     [string]$Action = "Menu",
     [string]$Command
 )
@@ -131,6 +131,13 @@ function Stop-SerialBridge {
         return
     }
     Stop-Process -Id $Running.ProcessId -Force
+    for ($Attempt = 0; $Attempt -lt 30; $Attempt++) {
+        if ($null -eq (Get-Process -Id $Running.ProcessId -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($null -ne (Get-Process -Id $Running.ProcessId -ErrorAction SilentlyContinue)) {
+        throw "串口桥进程未能退出，COM 口可能仍被占用。"
+    }
     Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
     Write-Host "已停止串口桥（PID $($Running.ProcessId)），COM 口已释放。" -ForegroundColor Green
 }
@@ -194,6 +201,25 @@ function Find-NextSerialPort {
     if ($null -ne (Get-BridgeProcess)) {
         Write-Host "当前串口桥仍使用原端口；请先停止再启动，使新配置生效。" -ForegroundColor Yellow
     }
+    return $PortName
+}
+
+function Switch-AndConnectNextSerialPort {
+    $OldConfig = Get-SerialConfig
+    Write-Host "准备释放当前串口：$($OldConfig.Port)" -ForegroundColor Cyan
+    Stop-SerialBridge
+    Start-Sleep -Milliseconds 300
+    if (Test-TcpEndpoint $OldConfig.Host $OldConfig.TcpPort) {
+        throw "共享地址 $($OldConfig.Host):$($OldConfig.TcpPort) 仍被其他进程占用，无法安全地自动连接。"
+    }
+
+    Write-Host "当前串口已释放。现在请拔插目标 USB-UART，或接入新的串口。" -ForegroundColor Green
+    $DetectedPort = Find-NextSerialPort
+    if ([string]::IsNullOrWhiteSpace($DetectedPort)) { return }
+
+    Write-Host "正在连接新串口：$DetectedPort" -ForegroundColor Cyan
+    Start-SerialBridge
+    Open-SerialTerminal
 }
 
 function Edit-SerialConfig {
@@ -233,10 +259,11 @@ function Show-Menu {
         Write-Host "2. 打开交互终端"
         Write-Host "3. 发送单条命令"
         Write-Host "4. 停止串口桥并释放 COM 口"
-        Write-Host "5. 自动检测下次接入的串口"
-        Write-Host "6. 查看当前串口"
-        Write-Host "7. 编辑本地配置"
-        Write-Host "8. 打开日志目录"
+        Write-Host "5. 释放当前 COM 口，检测下次接入并自动连接"
+        Write-Host "6. 只自动检测下次接入的串口"
+        Write-Host "7. 查看当前串口"
+        Write-Host "8. 编辑本地配置"
+        Write-Host "9. 打开日志目录"
         Write-Host "0. 退出菜单（后台串口桥保持运行）"
         Write-Host ""
         $Choice = Read-Host "请选择"
@@ -246,10 +273,11 @@ function Show-Menu {
                 "2" { Open-SerialTerminal }
                 "3" { $Text = Read-Host "请输入命令"; Send-SerialCommand $Text }
                 "4" { Stop-SerialBridge }
-                "5" { Find-NextSerialPort }
-                "6" { Show-SerialPorts }
-                "7" { Edit-SerialConfig }
-                "8" {
+                "5" { Switch-AndConnectNextSerialPort }
+                "6" { Find-NextSerialPort | Out-Null }
+                "7" { Show-SerialPorts }
+                "8" { Edit-SerialConfig }
+                "9" {
                     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
                     Start-Process explorer.exe $LogDir
                 }
@@ -260,7 +288,7 @@ function Show-Menu {
         catch {
             Write-Host "错误：$($_.Exception.Message)" -ForegroundColor Red
         }
-        if ($Choice -notin @("0", "2", "7", "8")) {
+        if ($Choice -notin @("0", "2", "5", "8", "9")) {
             Write-Host ""
             Read-Host "按 Enter 继续" | Out-Null
         }
@@ -277,6 +305,7 @@ switch ($Action) {
         Send-SerialCommand $Command
     }
     "Ports"      { Show-SerialPorts }
-    "AutoDetect" { Find-NextSerialPort }
+    "AutoDetect" { Find-NextSerialPort | Out-Null }
+    "SwitchConnect" { Switch-AndConnectNextSerialPort }
     default      { Show-Menu }
 }

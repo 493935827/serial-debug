@@ -12,7 +12,7 @@ For a persistent bridge that the human can start and stop without an agent, doub
 windows\serial_console.cmd
 ```
 
-The Chinese menu can detect the next attached or reattached COM port, persist it in the ignored `windows/serial_config.local.psd1`, start or stop the hidden bridge, send one command, and open logs. Its human terminal uses pySerial's mature `miniterm` through the bridge's `socket://` endpoint. Closing the menu leaves the bridge running; menu item `4` stops it and releases the physical port.
+The Chinese menu can safely stop its managed bridge to release the current COM handle, detect the next attached or reattached port, persist it in the ignored `windows/serial_config.local.psd1`, restart the bridge, and open pySerial `miniterm` through the bridge's `socket://` endpoint. It does not terminate unrelated applications that may own a COM port. Closing the menu leaves the bridge running; menu item `4` stops it and releases the physical port.
 
 ## Start The Bridge
 
