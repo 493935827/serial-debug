@@ -92,7 +92,6 @@ Use `send` for ordinary agent command/response work. Use the persistent `connect
 - Read `references/console-client.md` for Conserver client command details.
 - Read `references/hardware-safety.md` before changing baud, wiring, voltage levels, RTS, DTR, reset/boot lines, or any access mode that can reset the target.
 - Read `references/troubleshooting.md` when a command fails, times out, loses sync, or two users collide on write access.
-- Read `references/andes-htol-sram-debug.md` when an Andes AICE/ICEman target, HTOL firmware, or an `.adx` image must be downloaded to SRAM and verified through UART. It covers COM-port proof, packed ELF LMA/VMA handling, GDB launch, and shell round-trip validation.
 
 ## Reporting
 
