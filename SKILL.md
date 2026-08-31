@@ -35,15 +35,9 @@ python scripts/shared_serial_bridge.py connect --tcp 8888
 
 The bundled bridge defaults to `CR` for Enter because many embedded shells treat `CRLF` as two submissions and print the prompt twice.
 
-4. Have the agent send through the same bridge:
+4. For agent attachment and command execution after the bridge starts, follow **Agent Connection** below.
 
-```bash
-python scripts/shared_serial_bridge.py send "misc md 0x00000000 4" --tcp 8888 --newline
-```
-
-5. Report command output from the shared channel. The human should be able to see the agent's command and device response in the terminal.
-
-6. If Conserver is available, use its client instead of the bundled bridge:
+5. If Conserver is available, use its client instead of the bundled bridge:
 
 ```bash
 conserver -V
@@ -52,13 +46,43 @@ console -s <CONSOLE>
 console -a <CONSOLE>
 ```
 
-7. Use prompt history and replay options to resynchronize after boot noise, resets, or missed output:
+6. Use prompt history and replay options to resynchronize after boot noise, resets, or missed output:
 
 ```bash
 console -A <CONSOLE>
 console -F <CONSOLE>
 console -S <CONSOLE>
 ```
+
+## Agent Connection
+
+When the user says the bridge is running, preserve that bridge and the human terminal. The bridge remains the only owner of the physical COM port; the agent attaches to its local TCP endpoint.
+
+1. Resolve the current endpoint before sending. Locate a Windows controller in the active workspace with `rg --files -g serial_console.ps1`. If one is available, use its status action so the physical port, baud rate, line ending, endpoint, and managed PID come from local configuration; when multiple copies exist, select the one whose status reports the running managed bridge and matches the user's endpoint:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "<path>\serial_console.ps1" -Action Status
+```
+
+Otherwise use the endpoint explicitly supplied by the user or printed by the running bridge. Never guess an endpoint or open the physical COM port directly while the bridge owns it.
+
+2. Prefer the controller for routine agent commands because it applies the configured encoding and line ending and verifies that the managed bridge is running:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "<path>\serial_console.ps1" -Action Send -Command "help"
+```
+
+If the controller is unavailable, use a short-lived `send` client against the resolved endpoint:
+
+```bash
+python "<skill-dir>/scripts/shared_serial_bridge.py" send "help" --host 127.0.0.1 --tcp 8888 --newline --line-ending cr
+```
+
+Use `send` for ordinary agent command/response work. Use the persistent `connect` client only when the user explicitly asks the agent to maintain an interactive session.
+
+3. Read the complete response and exit status before sending the next command. The human terminal should display the same command and device response. A nonzero exit after transmission means the device outcome is unknown: inspect the shared terminal, prompt, and log before deciding whether a retry is safe.
+
+4. Read-only diagnostic commands are within an ordinary debugging request. Reset, erase, register or memory writes, flashing, boot-mode changes, and persistent configuration changes require an explicit user request that authorizes that state change; announce the change immediately before sending it.
 
 ## References
 
