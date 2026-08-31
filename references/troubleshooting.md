@@ -33,6 +33,14 @@ Check cable, adapter driver, permissions, and whether another tool already owns 
 - Check line endings and whether the device expects a command terminator.
 - For request/response protocols, ensure the agent has write access before typing.
 
+## Serial Port Disconnects During A Session
+
+- Keep the interactive client open. It reconnects to the bridge automatically.
+- Wait for `serial_reconnected` in bridge output and `reconnected` in the interactive client before entering the command again.
+- Commands typed while disconnected are discarded so stale input is not replayed after a target reboot.
+- If `send` exits nonzero, inspect the serial log and prompt before retrying; the target may have received only part of the command.
+- If the TCP listener is alive but a new `help` command produces no serial echo, the running bridge predates automatic serial recovery or is otherwise unhealthy. Verify its exact process command line, replace only that bridge process, and restart it without `--reset-dtr` unless a target reset was explicitly requested.
+
 ## Data Looks Wrong
 
 - Recheck the console attachment mode.

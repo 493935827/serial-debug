@@ -4,6 +4,8 @@ Use the bundled bridge when a human and agent need the same local serial port at
 
 The bridge process owns the physical port. Human terminals and agent senders connect to `127.0.0.1:<tcp>`.
 
+The bridge keeps its TCP listener alive across transient serial-port failures. It closes stale TCP clients, retries the physical port once per second, and resumes broadcasting after the port reopens. The interactive client reconnects automatically; commands typed while disconnected are discarded and must be entered again after the reconnect message.
+
 ## Manual Windows Menu
 
 For a persistent bridge that the human can start and stop without an agent, double-click:
@@ -30,6 +32,7 @@ python scripts/shared_serial_bridge.py connect --tcp 8888
 
 The human can watch live output and type commands here.
 By default, pressing Enter sends `CR` only. This matches many embedded shells better than `CRLF`.
+If the bridge restarts or drops the connection, leave this client open. It prints a short status message and reconnects without a Python traceback.
 
 ## Agent Command
 
@@ -39,6 +42,7 @@ python scripts/shared_serial_bridge.py send "misc md 0x00000000 4" --tcp 8888 --
 
 Use `--newline` for command shells that execute on Enter. The agent's command and device response are visible to other clients connected to the bridge.
 If a device expects a different line ending, use `--line-ending crlf` or `--line-ending lf`.
+`send` exits nonzero if the bridge disconnects before the response becomes idle. Treat that as an unknown command outcome; inspect the bridge log and target prompt before deciding whether it is safe to retry.
 
 ## Coordination Rules
 
