@@ -15,7 +15,7 @@ class SerialWindow(QMainWindow):
         form=QFormLayout(); form.addRow('Port',self.port); form.addRow('Baud',self.baud); form.addRow('Encoding',self.encoding); form.addRow('Line ending',self.newline); form.addRow('Send mode',self.hex_mode); buttons=QHBoxLayout()
         for b in (self.connect_button,self.release_button,self.takeover): buttons.addWidget(b)
         layout=QVBoxLayout(); layout.addWidget(self.status_label); layout.addLayout(form); layout.addLayout(buttons); layout.addWidget(self.rx); layout.addWidget(self.command); layout.addWidget(self.send_button); wrapper=QWidget(); wrapper.setLayout(layout); self.setCentralWidget(wrapper)
-        self.send_button.clicked.connect(self.send_command); self.command.returnPressed.connect(self.send_command); self.connect_button.clicked.connect(lambda:self.action('serial.open',port=self.port.text(),baudrate=int(self.baud.currentText()))); self.release_button.clicked.connect(lambda:self.action('serial.close')); self.takeover.clicked.connect(lambda:self.action('agent.takeover'))
+        self.send_button.clicked.connect(self.send_command); self.command.returnPressed.connect(self.send_command); self.connect_button.clicked.connect(lambda:self.action('serial.open',port=self.port.text(),baudrate=int(self.baud.currentText()))); self.release_button.clicked.connect(lambda:self.action('serial.close')); self.takeover.clicked.connect(self.takeover_agent)
         self.timer=QTimer(self); self.timer.timeout.connect(self.poll_events); self.timer.start(30); self.refresh_state(self.client.call('status'))
     def action(self,name,**params):
         try:
@@ -25,6 +25,8 @@ class SerialWindow(QMainWindow):
                 self.send_button.setEnabled(bool(self.state.get('connected')))
                 self.connect_button.setEnabled(True); self.release_button.setEnabled(True); self.takeover.setEnabled(False)
         except Exception as e:QMessageBox.warning(self,'Serial service',str(e))
+    def takeover_agent(self):
+        self.action('agent.takeover')
     def send_command(self):
         try:
             action,params=parse_command(self.command.text())
