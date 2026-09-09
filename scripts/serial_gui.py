@@ -20,7 +20,10 @@ class SerialWindow(QMainWindow):
     def action(self,name,**params):
         try:
             self.refresh_state(self.client.call(name,**params))
-            if name == 'agent.takeover': self.refresh_state(self.client.call('status'))
+            if name == 'agent.takeover':
+                self.refresh_state(self.client.call('status'))
+                self.send_button.setEnabled(bool(self.state.get('connected')))
+                self.connect_button.setEnabled(True); self.release_button.setEnabled(True); self.takeover.setEnabled(False)
         except Exception as e:QMessageBox.warning(self,'Serial service',str(e))
     def send_command(self):
         try:
@@ -38,7 +41,6 @@ class SerialWindow(QMainWindow):
             elif e.get('event')=='state':self.refresh_state(e.get('state',{}))
         self.rx.setPlainText(self.buffer.render())
     def refresh_state(self,s):
-        if self.state and s.get('sequence', 0) < self.state.get('sequence', 0): return
         self.state=s; c=s.get('config',{}); self.port.setText(str(c.get('port') or '')); self.baud.setCurrentText(str(c.get('baudrate',115200))); owner=s.get('owner','human'); self.status_label.setText(f"Service: connected | Device: {'connected' if s.get('connected') else 'released'} | Owner: {owner}"); self.send_button.setEnabled(owner=='human' and s.get('connected',False)); self.connect_button.setEnabled(owner=='human'); self.release_button.setEnabled(owner=='human'); self.takeover.setEnabled(owner=='agent')
     def closeEvent(self,e):self.timer.stop();self.client.close();e.accept()
 def main():
