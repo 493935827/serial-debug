@@ -12,6 +12,7 @@
     # 共享串口桥使用的本机 TCP 地址。除非明确需要局域网访问，否则保持 127.0.0.1。
     Host       = "127.0.0.1"
     TcpPort    = 8888
+    ControlPort = 8889
 
     # 常见嵌入式 Shell 按 Enter 时使用 CR；也可设置为 lf 或 crlf。
     LineEnding = "cr"

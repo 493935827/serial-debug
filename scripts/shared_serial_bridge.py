@@ -33,147 +33,32 @@ def close_socket(sock):
 
 def open_serial(port, baud):
     # serial_for_url also accepts normal COM names and lets us test with loop://.
-    return serial.serial_for_url(port, baudrate=baud, timeout=0.05)
+    return serial.serial_for_url(port, baudrate=baud, timeout=0.05, write_timeout=0.5)
 
 
 def run_bridge(args):
-    serial_port = open_serial(args.port, args.baud)
-    state = {"serial": serial_port}
-    serial_lock = threading.Lock()
-    clients = []
-    clients_lock = threading.Lock()
-    stop = threading.Event()
+    # Also importable by the original standalone importlib test harness.
+    script_dir = str(Path(__file__).resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from serial_service import SerialService
 
-    log_path = Path(args.log or f"serial_{args.port}_{datetime.now():%Y%m%d_%H%M%S}.log")
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    def get_serial():
-        with serial_lock:
-            return state["serial"]
-
-    def disconnect_clients():
-        with clients_lock:
-            old_clients = clients[:]
-            clients.clear()
-        for client in old_clients:
-            close_socket(client)
-
-    def invalidate_serial(failed_port):
-        with serial_lock:
-            if state["serial"] is not failed_port:
-                return
-            state["serial"] = None
-        try:
-            failed_port.close()
-        except (OSError, serial.SerialException):
-            pass
-        disconnect_clients()
-        print(f"serial_disconnected port={args.port}; retrying", flush=True)
-
-    def reconnect_serial():
-        while not stop.is_set() and get_serial() is None:
-            try:
-                reopened = open_serial(args.port, args.baud)
-            except (OSError, serial.SerialException):
-                stop.wait(1)
-                continue
-            with serial_lock:
-                if state["serial"] is None:
-                    state["serial"] = reopened
-                    print(f"serial_reconnected port={args.port} baud={args.baud}", flush=True)
-                    return reopened
-            reopened.close()
-        return get_serial()
-
-    def broadcast(data):
-        with clients_lock:
-            current_clients = clients[:]
-        for client in current_clients:
-            try:
-                client.sendall(data)
-            except OSError:
-                with clients_lock:
-                    if client in clients:
-                        clients.remove(client)
-                close_socket(client)
-
-    def serial_reader():
-        with log_path.open("ab") as log_file:
-            while not stop.is_set():
-                current = get_serial() or reconnect_serial()
-                if current is None:
-                    continue
-                try:
-                    data = current.read(4096)
-                except (OSError, serial.SerialException):
-                    invalidate_serial(current)
-                    continue
-                if data:
-                    log_file.write(data)
-                    log_file.flush()
-                    broadcast(data)
-
-    def client_handler(conn):
-        conn.settimeout(0.5)
-        with clients_lock:
-            clients.append(conn)
-        try:
-            while not stop.is_set():
-                try:
-                    data = conn.recv(4096)
-                except socket.timeout:
-                    continue
-                except OSError:
-                    break
-                if not data:
-                    break
-                current = get_serial()
-                if current is None:
-                    break
-                try:
-                    if args.chardelay:
-                        for byte in data:
-                            current.write(bytes([byte]))
-                            time.sleep(args.chardelay)
-                    else:
-                        current.write(data)
-                except (OSError, serial.SerialException):
-                    invalidate_serial(current)
-                    break
-        finally:
-            with clients_lock:
-                if conn in clients:
-                    clients.remove(conn)
-            close_socket(conn)
-
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((args.host, args.tcp))
-    server.listen(8)
-    server.settimeout(1)
-
-    threading.Thread(target=serial_reader, daemon=True).start()
-    print(
-        f"bridge_start port={args.port} baud={args.baud} "
-        f"tcp={args.host}:{args.tcp} log={log_path}",
-        flush=True,
-    )
+    safe_port = ''.join(c if c.isalnum() else '_' for c in (args.port or 'released'))
+    log_path = args.log or f"serial_{safe_port}_{datetime.now():%Y%m%d_%H%M%S}.log"
+    service = SerialService(
+        port=args.port, baud=args.baud, host=args.host, tcp=args.tcp,
+        control=getattr(args, 'control', None) or args.tcp + 1,
+        chardelay=args.chardelay, log=log_path, serial_factory=open_serial,
+    ).start()
+    print(f"bridge_start port={args.port} baud={args.baud} "
+          f"tcp={args.host}:{service.tcp_port} control={service.control_port} log={log_path}", flush=True)
     try:
-        while True:
-            try:
-                conn, _ = server.accept()
-            except socket.timeout:
-                continue
-            threading.Thread(target=client_handler, args=(conn,), daemon=True).start()
+        while not service.stop.wait(.2):
+            pass
     except KeyboardInterrupt:
         pass
     finally:
-        stop.set()
-        current = get_serial()
-        if current is not None:
-            current.close()
-        disconnect_clients()
-        server.close()
+        service.close()
 
 
 def receive_until_idle(sock, idle_seconds, max_seconds):
@@ -326,12 +211,13 @@ def build_parser():
     commands = parser.add_subparsers(dest="command", required=True)
 
     bridge = commands.add_parser("bridge", help="独占串口并提供本机 TCP 共享端点")
-    bridge.add_argument("--port", required=True)
-    bridge.add_argument("--baud", type=int, required=True)
+    bridge.add_argument("--port", help="Omit to start with the device released")
+    bridge.add_argument("--baud", type=int, default=115200)
     bridge.add_argument("--host", default="127.0.0.1")
     bridge.add_argument("--tcp", type=int, default=8888)
     bridge.add_argument("--chardelay", type=float, default=0.0)
     bridge.add_argument("--log")
+    bridge.add_argument("--control", type=int, help="Management TCP port; default raw TCP + 1")
     bridge.set_defaults(func=run_bridge)
 
     connect = commands.add_parser("connect", help="打开交互串口终端")
@@ -360,6 +246,9 @@ def main():
     args = build_parser().parse_args()
     try:
         result = args.func(args)
+    except (OSError, serial.SerialException) as exc:
+        sys.stderr.write(f"[串口桥] {exc}\n")
+        result = 2
     except KeyboardInterrupt:
         result = 130
     if isinstance(result, int):

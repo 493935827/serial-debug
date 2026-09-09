@@ -116,6 +116,7 @@ function Start-SerialBridge {
         "--baud", [string]$Config.Baud,
         "--host", [string]$Config.Host,
         "--tcp", [string]$Config.TcpPort,
+        "--control", [string]$(if ($null -ne $Config.ControlPort) { $Config.ControlPort } else { 8889 }),
         "--chardelay", [string]$Config.CharDelay,
         "--log", $SerialLog
     )
