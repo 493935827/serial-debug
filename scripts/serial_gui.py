@@ -10,8 +10,9 @@ class SerialWindow(QMainWindow):
         super().__init__(); self.setWindowTitle('Shared Serial Debug'); self.buffer=StreamBuffer(); self.state=None
         self.client=Client(host,control); self.client.subscribe(); self.port=QLineEdit(); self.baud=QComboBox(); self.baud.setEditable(True); self.baud.addItems(['9600','19200','38400','57600','115200','230400','460800','921600'])
         self.rx=QPlainTextEdit(); self.rx.setReadOnly(True); self.command=QLineEdit(); self.command.setPlaceholderText('status | send {"data":"help","newline":"cr"}')
+        self.encoding=QComboBox(); self.encoding.addItems(['utf-8','ascii']); self.newline=QComboBox(); self.newline.addItems(['none','cr','lf','crlf']); self.hex_mode=QComboBox(); self.hex_mode.addItems(['text','hex'])
         self.send_button=QPushButton('Send'); self.takeover=QPushButton('Terminate Agent and Take Over'); self.connect_button=QPushButton('Open'); self.release_button=QPushButton('Release device'); self.status_label=QLabel('Connecting…')
-        form=QFormLayout(); form.addRow('Port',self.port); form.addRow('Baud',self.baud); buttons=QHBoxLayout()
+        form=QFormLayout(); form.addRow('Port',self.port); form.addRow('Baud',self.baud); form.addRow('Encoding',self.encoding); form.addRow('Line ending',self.newline); form.addRow('Send mode',self.hex_mode); buttons=QHBoxLayout()
         for b in (self.connect_button,self.release_button,self.takeover): buttons.addWidget(b)
         layout=QVBoxLayout(); layout.addWidget(self.status_label); layout.addLayout(form); layout.addLayout(buttons); layout.addWidget(self.rx); layout.addWidget(self.command); layout.addWidget(self.send_button); wrapper=QWidget(); wrapper.setLayout(layout); self.setCentralWidget(wrapper)
         self.send_button.clicked.connect(self.send_command); self.command.returnPressed.connect(self.send_command); self.connect_button.clicked.connect(lambda:self.action('serial.open',port=self.port.text(),baudrate=int(self.baud.currentText()))); self.release_button.clicked.connect(lambda:self.action('serial.close')); self.takeover.clicked.connect(lambda:self.action('agent.takeover'))
@@ -25,6 +26,8 @@ class SerialWindow(QMainWindow):
         try:
             action,params=parse_command(self.command.text())
             if action=='clear':self.buffer.clear();self.rx.clear();return
+            if action == 'send': params.setdefault('encoding', self.encoding.currentText()); params.setdefault('newline', self.newline.currentText())
+            if action == 'send' and self.hex_mode.currentText() == 'hex': action = 'send.hex'; params = {'data': params.get('data','')}
             self.refresh_state(self.client.call(action,**params));self.command.clear()
         except Exception as e:QMessageBox.warning(self,'Command',str(e))
     def poll_events(self):
